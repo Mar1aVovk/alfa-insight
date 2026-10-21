@@ -1,0 +1,10 @@
+node_modules
+.git
+.cache
+.wrangler
+dist
+.env
+.env.*
+.dev.vars
+outputs
+work

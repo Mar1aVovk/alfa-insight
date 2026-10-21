@@ -1,0 +1,17 @@
+import {readFileSync,writeFileSync} from 'node:fs';
+import {spawnSync,spawn} from 'node:child_process';
+import {resolve} from 'node:path';
+import {writeBindings} from './runtime-config.mjs';
+const configPath='dist/server/wrangler.json';
+const config=JSON.parse(readFileSync(configPath,'utf8'));
+for(const db of config.d1_databases??[])db.migrations_dir=resolve('drizzle');
+writeFileSync(configPath,JSON.stringify(config));
+writeBindings('dist/server/.dev.vars');
+const cli='./node_modules/wrangler/bin/wrangler.js';
+const common=['--config',configPath,'--local','--persist-to','.wrangler/state'];
+const migration=spawnSync(process.execPath,[cli,'d1','migrations','apply','DB',...common],{stdio:'inherit'});
+if(migration.status!==0)process.exit(migration.status??1);
+const child=spawn(process.execPath,[cli,'dev',...common,'--ip',process.env.HOST??'127.0.0.1','--port',process.env.PORT??'3000','--inspector-port','0'],{stdio:'inherit'});
+for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>child.kill(signal));
+child.on('error',e=>{console.error(e.message);process.exit(1);});
+child.on('exit',code=>process.exit(code??1));

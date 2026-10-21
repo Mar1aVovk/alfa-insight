@@ -1,0 +1,37 @@
+import {mkdirSync,writeFileSync,readFileSync,readdirSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {createRequire} from 'node:module';
+import assert from 'node:assert/strict';
+import path from 'node:path';
+const out=path.resolve('.cache/core-tests');mkdirSync(out,{recursive:true});
+const build=spawnSync(process.execPath,['node_modules/typescript/bin/tsc','lib/ranking.ts','lib/validation.ts','--module','commonjs','--moduleResolution','node','--target','ES2022','--outDir',out,'--skipLibCheck','--esModuleInterop'],{encoding:'utf8'});
+if(build.status){console.error(build.stdout,build.stderr);process.exit(1);}
+writeFileSync(path.join(out,'package.json'),'{"type":"commonjs"}');
+const require=createRequire(import.meta.url);
+const {rankNews,rankFeed,scenarioImpact}=require(path.join(out,'ranking.js'));
+const {validateEvidence,insightSchema,personalizationIssues,limitToGroundedStatements}=require(path.join(out,'validation.js'));
+const load=id=>JSON.parse(readFileSync('public/data/companies/'+(Number(id.slice(2))%128)+'.json'))[id];
+const borrower=load('U_9250'),tech=load('U_182712');
+const base={id:'test',title:'Банк России снизил ключевую ставку',body:'Регулятор сообщил о снижении ключевой ставки.',url:'https://example.com/test',source:'Тестовый материал',publishedAt:new Date().toISOString(),origin:'user',contentScope:'test'};
+let passed=0;function check(name,fn){fn();passed++;console.log('PASS',name);}
+check('Rate event is more relevant to a borrower',()=>assert.ok(rankNews(base,borrower,'cfo').score>rankNews(base,tech,'ceo').score));
+check('Rate reduction is not automatically a risk for a borrower',()=>assert.equal(rankNews(base,borrower,'cfo').kind,'opportunity'));
+check('Sport does not enter a business feed',()=>assert.equal(rankFeed([{...base,title:'Команда победила в финале турнира',body:'Игроки забили два гола.'}],borrower,'cfo').length,0));
+check('Bond market misconduct is not a borrowing-rate event',()=>assert.equal(rankFeed([{...base,title:'Установлено манипулирование облигациями',body:'Участник рынка нарушил порядок торгов облигациями.'}],borrower,'cfo').length,0));
+check('A securities portfolio is not a seaport',()=>{const transport={...borrower,okved:'49.41',industry:'Перевозка грузов',group:{...borrower.group,size:1}};assert.equal(rankFeed([{...base,title:'Управляющий изменил портфель ценных бумаг',body:'Портфель активов пересмотрен.'}],transport,'cfo').length,0);});
+check('Relevance changes across industries',()=>{const n={...base,title:'Изменились условия поставок программного обеспечения',body:'Рынок программного обеспечения изменился.'};assert.ok(rankNews(n,tech,'cfo').score>rankNews(n,borrower,'cfo').score);});
+check('Scenario calculation uses percentage points correctly',()=>{assert.equal(scenarioImpact(100000000,1).annual,1000000);assert.equal(scenarioImpact(100000000,-1).annual,-1000000);assert.throws(()=>scenarioImpact(-10,1));});
+check('Self transfers never appear as external counterparties',()=>{for(const id of ['U_9250','U_182712','U_94669'])assert.ok(load(id).payments.edges.every(e=>e.id!==id));});
+check('Group revenue is explicitly not consolidated',()=>assert.equal(borrower.group.revenueSumIsConsolidated,false));
+check('Historical bank document stays marked historical',()=>{const bank=JSON.parse(readFileSync('public/data/bank.json'));assert.equal(bank.documents.find(d=>d.filename.includes('2021')).historical,true);assert.equal(bank.documents.length,9);assert.equal(bank.pages.length,64);});
+const insight={headline:'Проверка',summary:'Проверка источников',whyForYou:[{text:'Кредитование',companyFields:['products']}],impacts:[{kind:'watch',text:'Условный эффект',sourceIds:['test']}],bankView:{text:'Нет позиции',sourceIds:[],asOf:null},actions:['Уточнить'],missingData:[],confidence:'low'};
+check('No follow-up search may be expressed as null by the model',()=>assert.equal(insightSchema.parse({...insight,evidenceQuery:null}).evidenceQuery,undefined));
+check('A country link never proves a high import share',()=>assert.ok(personalizationIssues({...insight,whyForYou:[{text:'Высокая доля импорта из Китая требует валютных операций.',companyFields:['countries']}]}).length));
+check('An unknown floating rate cannot be asserted as a company fact',()=>assert.ok(personalizationIssues({...insight,impacts:[{kind:'risk',text:'Рост стоимости обслуживания текущих кредитов из-за привязки ставок к ключевой ставке ЦБ.',sourceIds:['test']}]}).length));
+check('An explicitly conditional floating-rate scenario is allowed',()=>assert.equal(personalizationIssues({...insight,impacts:[{kind:'watch',text:'Если в договорах есть плавающая ставка, её изменение может изменить расходы.',sourceIds:['test']}]}).length,0));
+check('Unsupported personalization is removed without losing valid evidence',()=>{const bad={...insight,whyForYou:[{text:'Высокая доля импорта из Китая требует валютных операций.',companyFields:['countries']}],impacts:[{kind:'risk',text:'Рост стоимости обслуживания текущих кредитов из-за привязки ставок к ключевой ставке ЦБ.',sourceIds:['test']}]};const safe=limitToGroundedStatements(bad,{},borrower,base);assert.equal(personalizationIssues(safe).length,0);assert.equal(safe.confidence,'low');assert.ok(safe.missingData.length);assert.doesNotThrow(()=>validateEvidence(insightSchema.parse(safe),[],base));});
+check('Unknown evidence is rejected',()=>assert.throws(()=>validateEvidence({...insight,impacts:[{...insight.impacts[0],sourceIds:['invented']}]},[],base)));
+check('Existing evidence is accepted',()=>assert.doesNotThrow(()=>validateEvidence(insight,[],base)));
+check('Owner field cannot be invented',()=>assert.throws(()=>validateEvidence({...insight,whyForYou:[{text:'Собственник',companyFields:['ownerName']}]},[],base)));
+check('Prepared partitions cover the full unique client base',()=>{let n=0;for(const f of readdirSync('public/data/companies'))n+=Object.keys(JSON.parse(readFileSync('public/data/companies/'+f))).length;assert.equal(n,85514);});
+console.log(`${passed} meaningful checks passed.`);
